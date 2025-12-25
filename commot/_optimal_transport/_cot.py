@@ -185,7 +185,8 @@ def cot_blk_dense(S, D, A, M, cutoff, eps_p=1e-1, eps_mu=None, eps_nu=None, rho=
             P_expand[i,j,:,:] = P[:,:]
     return P_expand
 
-def cot_combine_sparse(S, D, A, M, cutoff, eps_p=1e-1, eps_mu=None, eps_nu=None, rho=1e1, weights=(0.25,0.25,0.25,0.25), nitermax=1e4, stopthr=1e-8, verbose=False):
+def cot_combine_sparse(S, D, A, M, cutoff, eps_p=1e-1, eps_mu=None, eps_nu=None, rho=1e1, weights=(0.25,0.25,0.25,0.25), nitermax=1e4, stopthr=1e-8, verbose=False, n_jobs=-1):
+    """⚡ OPTIMIZED: Added n_jobs parameter for parallelization"""
     if isinstance(eps_p, tuple):
         eps_p_cot, eps_p_row, eps_p_col, eps_p_blk = eps_p
     else:
@@ -209,6 +210,9 @@ def cot_combine_sparse(S, D, A, M, cutoff, eps_p=1e-1, eps_mu=None, eps_nu=None,
     else:
         eps_nu_cot = eps_nu_row = eps_nu_col = eps_nu_blk = eps_nu
 
+    if verbose:
+        print(f'  ⚡ Running COT_COMBINE (optimized) with {n_jobs} parallel jobs')
+
     P_cot = cot_sparse(S, D, A, M, cutoff, \
         eps_p=eps_p_cot, eps_mu=eps_mu_cot, eps_nu=eps_nu_cot, rho=rho_cot, \
         nitermax=nitermax, stopthr=stopthr, verbose=False)
@@ -218,9 +222,10 @@ def cot_combine_sparse(S, D, A, M, cutoff, eps_p=1e-1, eps_mu=None, eps_nu=None,
     P_col = cot_col_sparse(S, D, A, M, cutoff, \
         eps_p=eps_p_col, eps_mu=eps_mu_col, eps_nu=eps_nu_col, rho=rho_col, \
         nitermax=nitermax, stopthr=stopthr, verbose=False)
-    P_blk = cot_blk_sparse(S, D, A, M, cutoff, \
+    # ⚡ USE PARALLEL VERSION
+    P_blk = cot_blk_sparse_parallel(S, D, A, M, cutoff, \
         eps_p=eps_p_blk, eps_mu=eps_mu_blk, eps_nu=eps_nu_blk, rho=rho_blk, \
-        nitermax=nitermax, stopthr=stopthr, verbose=False)
+        nitermax=nitermax, stopthr=stopthr, verbose=verbose, n_jobs=n_jobs)
 
     P = {}
     for i in range(A.shape[0]):
@@ -556,3 +561,97 @@ def coo_submatrix_pull(matr, rows, cols):
     newcols = mcol[newelem]
     return sparse.coo_matrix((matr.data[newelem], np.array([gr[newrows],
         gc[newcols]])),(lr, lc))
+# ============================================================================
+# OPTIMIZED FUNCTIONS - Added for performance boost
+# ============================================================================
+
+from joblib import Parallel, delayed, parallel_backend
+import os
+
+def cot_blk_sparse_parallel(S, D, A, M, cutoff, eps_p=1e-1, eps_mu=None, eps_nu=None, 
+                            rho=1e1, nitermax=1e4, stopthr=1e-8, verbose=False, n_jobs=-1):
+    """
+    ⚡ PARALLEL version of cot_blk_sparse
+    
+    Computes each (i,j) L-R pair independently using joblib parallelization
+    Speedup: ~Nx on N-core CPU (理论上接近线性加速)
+    Precision: IDENTICAL to original (完全相同的数学)
+    """
+    if eps_mu is None: eps_mu = eps_p
+    if eps_nu is None: eps_nu = eps_p
+    if max(abs(eps_p-eps_mu), abs(eps_p-eps_nu)) > 1e-8:
+        unot_solver = "momentum"
+    else:
+        unot_solver = "sinkhorn"
+    
+    n_pos_s, ns_s = S.shape
+    n_pos_d, ns_d = D.shape
+
+    max_cutoff = cutoff.max()
+    M_row, M_col = np.where(M <= max_cutoff)
+    M_max_sp = sparse.coo_matrix((M[M_row,M_col], (M_row,M_col)), shape=M.shape)
+
+    # Collect all (i,j) pairs to compute
+    tasks = []
+    for i in range(ns_s):
+        for j in range(ns_d):
+            if not np.isinf(A[i,j]):
+                tasks.append((i, j))
+    
+    n_cores = n_jobs if n_jobs > 0 else os.cpu_count()
+    if verbose:
+        print(f'  ⚡ Parallel COT_BLK: {len(tasks)} L-R pairs on {n_cores} cores')
+    
+    def compute_single_pair(i, j):
+        """Compute OT for a single L-R pair"""
+        a = S[:,i]; b = D[:,j]
+        nzind_a = np.where(a > 0)[0]; nzind_b = np.where(b > 0)[0]
+        
+        if len(nzind_a)==0 or len(nzind_b)==0:
+            return (i,j), sparse.coo_matrix(([],([],[])), shape=(n_pos_s, n_pos_d), dtype=float)
+        
+        max_amount = max(a.sum(), b.sum())
+        a_norm = a / max_amount
+        b_norm = b / max_amount
+        
+        tmp_nzind_s = np.where(S[:,i] > 0)[0]
+        tmp_nzind_d = np.where(D[:,j] > 0)[0]
+        tmp_M_max_sp = coo_submatrix_pull(M_max_sp, tmp_nzind_s, tmp_nzind_d)
+        tmp_ind = np.where(tmp_M_max_sp.data <= cutoff[i,j])[0]
+        tmp_row = tmp_nzind_s[tmp_M_max_sp.row[tmp_ind]]
+        tmp_col = tmp_nzind_d[tmp_M_max_sp.col[tmp_ind]]
+        
+        C_data = tmp_M_max_sp.data[tmp_ind] * A[i,j]
+        cost_scale = np.max(M_max_sp.data[np.where(M_max_sp.data <= cutoff[i,j])]) * A[i,j]
+        C_local = sparse.coo_matrix((C_data/cost_scale, (tmp_row, tmp_col)), shape=(len(a), len(b)))
+
+        nzind_a_local = np.where(a_norm > 0)[0]
+        nzind_b_local = np.where(b_norm > 0)[0]
+        C_nz = coo_submatrix_pull(C_local, nzind_a_local, nzind_b_local)
+
+        tmp_P = unot(a_norm[nzind_a_local], b_norm[nzind_b_local], C_nz, eps_p, rho,
+                    eps_mu=eps_mu, eps_nu=eps_nu, sparse_mtx=True, solver=unot_solver, 
+                    nitermax=nitermax, stopthr=stopthr)
+
+        P = sparse.coo_matrix((tmp_P.data, (nzind_a_local[tmp_P.row], nzind_b_local[tmp_P.col])), 
+                             shape=(len(a), len(b)))
+        
+        return (i,j), P * max_amount
+    
+    # Parallel computation
+    if n_jobs != 1 and len(tasks) > 1:
+        # Use threading backend for NumPy/SciPy operations
+        # Note: threading is chosen over multiprocessing because:
+        # 1. Shared memory (M_max_sp, S, D) avoids serialization overhead
+        # 2. NumPy releases GIL for C-level operations
+        # 3. Faster startup time than multiprocessing
+        with parallel_backend('threading', n_jobs=n_cores):
+            results = Parallel(verbose=0)(delayed(compute_single_pair)(i, j) for i, j in tasks)
+    else:
+        # Sequential fallback
+        results = [compute_single_pair(i, j) for i, j in tasks]
+    
+    # Assemble results
+    P_expand = dict(results)
+    
+    return P_expand

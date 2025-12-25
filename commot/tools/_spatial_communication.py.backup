@@ -36,31 +36,20 @@ def coo_from_dense_submat(row, col, x, shape):
     sparse_mat.eliminate_zeros()
     return(sparse_mat)
 
-class CellCommunicationHeavyOpt(object):
-    """
-    ⚡⚡⚡ 完全优化版本的CellCommunication
-    
-    关键优化：
-    1. 预提取所有基因表达数据（一次性访问anndata）
-    2. 向量化heteromeric计算
-    3. 智能缓存
-    """
-    
-    def __init__(self, adata, df_ligrec, dmat, dis_thr, cost_scale, cost_type,
-                 heteromeric=None, heteromeric_rule='min', heteromeric_delimiter='_'):
-        
-        # Input validation
-        if adata is None or adata.shape[0] == 0:
-            raise ValueError("adata cannot be None or empty")
-        if df_ligrec is None or len(df_ligrec) == 0:
-            raise ValueError("df_ligrec cannot be None or empty")
-        
-        # Pandas兼容性
-        df_ligrec = df_ligrec.copy()
-        df_ligrec.columns = range(df_ligrec.shape[1])
-        
+class CellCommunication(object):
+
+    def __init__(self,
+        adata,
+        df_ligrec,
+        dmat,
+        dis_thr,
+        cost_scale,
+        cost_type,
+        heteromeric = None,
+        heteromeric_rule = 'min',
+        heteromeric_delimiter = '_'
+    ):
         data_genes = set(adata.var_names)
-        
         if not heteromeric:
             self.ligs = list(set(df_ligrec.iloc[:,0]).intersection(data_genes))
             self.recs = list(set(df_ligrec.iloc[:,1]).intersection(data_genes))
@@ -74,50 +63,24 @@ class CellCommunicationHeavyOpt(object):
                     else:
                         A[self.ligs.index(tmp_lig), self.recs.index(tmp_rec)] = cost_scale[(tmp_lig, tmp_rec)]
             self.A = A
-            # ⚡⚡⚡ 关键优化：一次性提取所有配体和受体基因表达
-            if len(self.ligs) > 0 and len(self.recs) > 0:
-                lig_expr = adata[:, self.ligs].X
-                if sparse.issparse(lig_expr):
-                    self.S = lig_expr.toarray()
-                else:
-                    self.S = lig_expr
-                
-                rec_expr = adata[:, self.recs].X
-                if sparse.issparse(rec_expr):
-                    self.D = rec_expr.toarray()
-                else:
-                    self.D = rec_expr
-            else:
-                self.S = np.zeros((adata.shape[0], len(self.ligs)), dtype=float)
-                self.D = np.zeros((adata.shape[0], len(self.recs)), dtype=float)
-            
+            self.S = adata[:,self.ligs].X.toarray()
+            self.D = adata[:,self.recs].X.toarray()
+
         elif heteromeric:
-            print("  ⚡ Optimizing heteromeric complex expression calculation...")
             tmp_ligs = list(set(df_ligrec.iloc[:,0]))
             tmp_recs = list(set(df_ligrec.iloc[:,1]))
-            
-            # 预检查可用的L-R对
             avail_ligs = []
             avail_recs = []
-            lig_gene_lists = []  # 记录每个配体的基因列表
-            rec_gene_lists = []  # 记录每个受体的基因列表
-            
             for tmp_lig in tmp_ligs:
-                lig_genes = tmp_lig.split(heteromeric_delimiter)
-                if set(lig_genes).issubset(data_genes):
+                lig_genes = set(tmp_lig.split(heteromeric_delimiter))
+                if lig_genes.issubset(data_genes):
                     avail_ligs.append(tmp_lig)
-                    lig_gene_lists.append(lig_genes)
-            
             for tmp_rec in tmp_recs:
-                rec_genes = tmp_rec.split(heteromeric_delimiter)
-                if set(rec_genes).issubset(data_genes):
+                rec_genes = set(tmp_rec.split(heteromeric_delimiter))
+                if rec_genes.issubset(data_genes):
                     avail_recs.append(tmp_rec)
-                    rec_gene_lists.append(rec_genes)
-            
             self.ligs = avail_ligs
             self.recs = avail_recs
-            
-            # 构建A矩阵
             A = np.inf * np.ones([len(self.ligs), len(self.recs)], float)
             for i in range(len(df_ligrec)):
                 tmp_lig = df_ligrec.iloc[i,0]
@@ -128,73 +91,35 @@ class CellCommunicationHeavyOpt(object):
                     else:
                         A[self.ligs.index(tmp_lig), self.recs.index(tmp_rec)] = cost_scale[(tmp_lig, tmp_rec)]
             self.A = A
-            
-            # ⚡⚡⚡ 关键优化：一次性提取所有需要的基因
-            all_lig_genes = set()
-            all_rec_genes = set()
-            for genes in lig_gene_lists:
-                all_lig_genes.update(genes)
-            for genes in rec_gene_lists:
-                all_rec_genes.update(genes)
-            
-            all_lig_genes = sorted(list(all_lig_genes))
-            all_rec_genes = sorted(list(all_rec_genes))
-            
-            print(f"    → Extracting {len(all_lig_genes)} ligand genes + {len(all_rec_genes)} receptor genes...")
-            
-            # ⚡ 一次性提取（而非1194次）
             ncell = adata.shape[0]
-            if len(all_lig_genes) > 0:
-                lig_expr_all = adata[:, all_lig_genes].X
-                if sparse.issparse(lig_expr_all):
-                    lig_expr_all = lig_expr_all.toarray()
-                lig_expr_dict = {gene: lig_expr_all[:, idx] for idx, gene in enumerate(all_lig_genes)}
-            else:
-                lig_expr_dict = {}
-            
-            if len(all_rec_genes) > 0:
-                rec_expr_all = adata[:, all_rec_genes].X
-                if sparse.issparse(rec_expr_all):
-                    rec_expr_all = rec_expr_all.toarray()
-                rec_expr_dict = {gene: rec_expr_all[:, idx] for idx, gene in enumerate(all_rec_genes)}
-            else:
-                rec_expr_dict = {}
-            
-            print(f"    → Computing {len(self.ligs)} ligand + {len(self.recs)} receptor expressions...")
-            
-            # ⚡ 向量化计算heteromeric表达
-            S = np.zeros([ncell, len(self.ligs)], float)
-            D = np.zeros([ncell, len(self.recs)], float)
-            
-            for i, genes in enumerate(lig_gene_lists):
-                expr_stack = np.column_stack([lig_expr_dict[g] for g in genes])
+            S = np.zeros([ncell, A.shape[0]], float)
+            D = np.zeros([ncell, A.shape[1]], float)
+            for i in range(len(self.ligs)):
+                tmp_lig = self.ligs[i]
+                lig_genes = tmp_lig.split(heteromeric_delimiter)
                 if heteromeric_rule == 'min':
-                    S[:,i] = expr_stack.min(axis=1)
+                    S[:,i] = adata[:, lig_genes].X.toarray().min(axis=1)[:]
                 elif heteromeric_rule == 'ave':
-                    S[:,i] = expr_stack.mean(axis=1)
-            
-            for i, genes in enumerate(rec_gene_lists):
-                expr_stack = np.column_stack([rec_expr_dict[g] for g in genes])
+                    S[:,i] = adata[:, lig_genes].X.toarray().mean(axis=1)[:]
+            for i in range(len(self.recs)):
+                tmp_rec = self.recs[i]
+                rec_genes = tmp_rec.split(heteromeric_delimiter)
                 if heteromeric_rule == 'min':
-                    D[:,i] = expr_stack.min(axis=1)
+                    D[:,i] = adata[:, rec_genes].X.toarray().min(axis=1)[:]
                 elif heteromeric_rule == 'ave':
-                    D[:,i] = expr_stack.mean(axis=1)
-            
+                    D[:,i] = adata[:, rec_genes].X.toarray().mean(axis=1)[:]
             self.S = S
             self.D = D
-            print(f"    ✅ Gene expression pre-extraction completed!")
         
-        # 设置cost矩阵
         if cost_type == 'euc':
             self.M = dmat
         elif cost_type == 'euc_square':
             self.M = dmat ** 2
-        
         if np.isscalar(dis_thr):
             if cost_type == 'euc_square':
                 dis_thr = dis_thr ** 2
             self.cutoff = float(dis_thr) * np.ones_like(A)
-        elif isinstance(dis_thr, dict):
+        elif type(dis_thr) is dict:
             self.cutoff = np.zeros_like(A)
             for i in range(A.shape[0]):
                 for j in range(A.shape[1]):
@@ -203,50 +128,46 @@ class CellCommunicationHeavyOpt(object):
                             self.cutoff[i,j] = dis_thr[(self.ligs[i], self.recs[j])] ** 2
                         else:
                             self.cutoff[i,j] = dis_thr[(self.ligs[i], self.recs[j])]
-        
-        self.nlig = self.S.shape[1]
-        self.nrec = self.D.shape[1]
+        self.nlig = self.S.shape[1]; self.nrec = self.D.shape[1]
         self.npts = adata.shape[0]
-    
-    def run_cot_signaling(self, cot_eps_p=1e-1, cot_eps_mu=None, cot_eps_nu=None, 
-                         cot_rho=1e1, cot_nitermax=1e4, cot_weights=(0.25,0.25,0.25,0.25),
-                         smooth=False, smth_eta=None, smth_nu=None, smth_kernel=None,
-                         n_jobs=-1, verbose=False):
+
+    def run_cot_signaling(self,
+        cot_eps_p=1e-1, 
+        cot_eps_mu=None, 
+        cot_eps_nu=None, 
+        cot_rho=1e1, 
+        cot_nitermax=1e4, 
+        cot_weights=(0.25,0.25,0.25,0.25), 
+        smooth=False, 
+        smth_eta=None, 
+        smth_nu=None, 
+        smth_kernel=None
+    ):
         if not smooth:
-            if verbose:
-                print(f"  ⚡ Running optimized COT with {n_jobs} parallel jobs...")
-            self.comm_network = cot_combine_sparse(
-                self.S, self.D, self.A, self.M, self.cutoff,
-                eps_p=cot_eps_p, eps_mu=cot_eps_mu, eps_nu=cot_eps_nu,
-                rho=cot_rho, weights=cot_weights, nitermax=cot_nitermax,
-                n_jobs=n_jobs, verbose=verbose
-            )
-        else:
-            # Smooth mode (simplified)
+            self.comm_network = cot_combine_sparse(self.S, self.D, self.A, self.M, self.cutoff, \
+                eps_p=cot_eps_p, eps_mu=cot_eps_mu, eps_nu=cot_eps_nu, rho=cot_rho, weights=cot_weights, nitermax=cot_nitermax)
+        if smooth:
+            # Smooth the expression
             S_smth = np.zeros_like(self.S)
             D_smth = np.zeros_like(self.D)
             for i in range(self.nlig):
                 nzind = np.where(self.S[:,i] > 0)[0]
                 phi = kernel_function(self.M[nzind,:][:,nzind], smth_eta, smth_nu, smth_kernel, normalization='unit_col_sum')
-                S_smth[nzind,i] = np.matmul(phi, self.S[nzind,i].reshape(-1,1))[:,0]
+                S_smth[nzind,i] = np.matmul( phi, self.S[nzind,i].reshape(-1,1) )[:,0]
             for i in range(self.nrec):
                 nzind = np.where(self.D[:,i] > 0)[0]
                 phi = kernel_function(self.M[nzind,:][:,nzind], smth_eta, smth_nu, smth_kernel, normalization='unit_col_sum')
-                D_smth[nzind,i] = np.matmul(phi, self.D[nzind,i].reshape(-1,1))[:,0]
-            
-            P_smth = cot_combine_sparse(S_smth, D_smth, self.A, self.M, self.cutoff,
-                eps_p=cot_eps_p, eps_mu=cot_eps_mu, eps_nu=cot_eps_nu,
-                rho=cot_rho, weights=cot_weights, nitermax=cot_nitermax,
-                n_jobs=n_jobs, verbose=verbose)
-            
-            # Deconvolution
+                D_smth[nzind,i] = np.matmul( phi, self.D[nzind,i].reshape(-1,1) )[:,0]
+            # Get the transport plans for the smoothed distributions
+            P_smth = cot_combine_sparse(S_smth, D_smth, self.A, self.M, self.cutoff, \
+                eps_p=cot_eps_p, eps_mu=cot_eps_mu, eps_nu=cot_eps_nu, rho=cot_rho, weights=cot_weights, nitermax=cot_nitermax)
+            # Deconvolute back to original cells
             self.comm_network = {}
             for i in range(self.nlig):
                 S = self.S[:,i]
                 nzind_S = np.where(S > 0)[0]
                 phi_S = kernel_function(self.M[nzind_S,:][:,nzind_S], smth_eta, smth_nu, smth_kernel, normalization='unit_col_sum')
-                S_contrib = phi_S * S[nzind_S]
-                S_contrib = S_contrib / np.sum(S_contrib, axis=1, keepdims=True)
+                S_contrib = phi_S * S[nzind_S]; S_contrib = S_contrib / np.sum(S_contrib, axis=1, keepdims=True)
                 for j in range(self.nrec):
                     D = self.D[:,j]
                     nzind_D = np.where(D > 0)[0]
@@ -254,128 +175,224 @@ class CellCommunicationHeavyOpt(object):
                     P_dense = P_smth[(i,j)].toarray()
                     P_sub = P_dense[nzind_S,:][:,nzind_D]
                     phi_D = kernel_function(self.M[nzind_D,:][:,nzind_D], smth_eta, smth_nu, smth_kernel, normalization='unit_col_sum')
-                    D_contrib = phi_D * D[nzind_D]
-                    D_contrib = D_contrib / np.sum(D_contrib, axis=1, keepdims=True)
+                    D_contrib = phi_D * D[nzind_D]; D_contrib = D_contrib / np.sum(D_contrib, axis=1, keepdims=True)
                     P_deconv = np.matmul(S_contrib.T, np.matmul(P_sub, D_contrib))
+                    for k in range(len(nzind_D)):
+                        P_dense[nzind_S, nzind_D[k]] = P_deconv[:,k]
                     P_deconv_sparse = coo_from_dense_submat(nzind_S, nzind_D, P_deconv, shape=(self.npts, self.npts))
                     self.comm_network[(i,j)] = P_deconv_sparse
 
-def compute_sparse_distance_matrix(coords, dis_thr, cost_type='euc'):
-    """
-    ⚡⚡ 策略2：计算稀疏距离矩阵（FIXED版本）
-    
-    只计算距离<dis_thr的点对，大幅减少计算量
-    
-    优化：
-    1. 使用预分配数组代替列表append
-    2. 直接使用radius_neighbors_graph（更快）
-    3. 避免不必要的dense转换
-    """
-    if coords.shape[0] == 0:
-        raise ValueError("coords cannot be empty")
-    
-    print(f"  ⚡ Computing SPARSE distance matrix (threshold={dis_thr})...")
-    
-    n = coords.shape[0]
-    
-    # 方法1: 直接使用radius_neighbors_graph（推荐）
-    from sklearn.neighbors import radius_neighbors_graph
-    
-    try:
-        # 使用radius_neighbors_graph直接构建稀疏矩阵
-        dmat_sparse = radius_neighbors_graph(
-            coords, 
-            radius=dis_thr, 
-            mode='distance',
-            metric='euclidean',
-            include_self=True  # 包含自己（距离=0）
-        )
-        
-        # 如果需要平方距离
-        if cost_type == 'euc_square':
-            dmat_sparse.data = dmat_sparse.data ** 2
-        
-        # 转为dense（后续代码需要）
-        # 注意：这里仍然转dense是因为COT算法需要dense格式
-        # 未来可以优化COT算法以支持稀疏输入
-        dmat_dense = np.full((n, n), np.inf, dtype=float)
-        dmat_coo = dmat_sparse.tocoo()
-        dmat_dense[dmat_coo.row, dmat_coo.col] = dmat_coo.data
-        
-        # 确保对角线为0（距离自己到自己）
-        np.fill_diagonal(dmat_dense, 0)
-        
-        nnz_pct = (dmat_sparse.nnz / (n*n)) * 100
-        print(f"    → Sparse matrix: {dmat_sparse.nnz:,} / {n*n:,} entries ({nnz_pct:.1f}%)")
-        print(f"    → Memory usage: {dmat_dense.nbytes / 1024**2:.1f} MB")
-        
-        return dmat_dense
-        
-    except Exception as e:
-        print(f"    ⚠️  Sparse distance computation failed: {e}")
-        print(f"    → Falling back to full distance matrix")
-        # Fallback到完整距离矩阵
-        dmat_dense = distance_matrix(coords, coords)
-        if cost_type == 'euc_square':
-            dmat_dense = dmat_dense ** 2
-        return dmat_dense
+    def smooth(self, eta, nu, kernel):
+        S_smth = np.zeros_like(self.S)
+        D_smth = np.zeros_like(self.D)
+        for i in range(self.nlig):
+            nzind = np.where(self.S[:,i] > 0)[0]
+            phi = kernel_function(self.M[nzind,:][:,nzind], eta, nu, kernel, normalization='unit_col_sum')
+            S_smth[nzind,i] = np.matmul( phi, self.S[nzind,i].reshape(-1,1) )[:,0]
+        for i in range(self.nrec):
+            nzind = np.where(self.D[:,i] > 0)[0]
+            phi = kernel_function(self.M[nzind,:][:,nzind], eta, nu, kernel, normalization='unit_col_sum')
+            D_smth[nzind,i] = np.matmul( phi, self.D[nzind,i].reshape(-1,1) )[:,0]
+        self.S_smth = S_smth
+        self.D_smth = D_smth
+        self.kernel_eta = eta
+        self.kernel_nu = nu
+        self.kernel = kernel
+
+def assign_distance(adata, dmat=None):
+    if dmat is None:
+        adata.obsp["spatial_distance"] = distance_matrix(adata.obsm["spatial"], adata.obsm["spatial"])
+    else:
+        adata.obsp["spatial_distance"] = dmat
+
+def summarize_cluster(X, clusterid, clusternames, n_permutations=500):
+    # Input a sparse matrix of cell signaling and output a pandas dataframe
+    # for cluster-cluster signaling
+    n = len(clusternames)
+    X_cluster = np.empty([n,n], float)
+    p_cluster = np.zeros([n,n], float)
+    for i in range(n):
+        tmp_idx_i = np.where(clusterid==clusternames[i])[0]
+        for j in range(n):
+            tmp_idx_j = np.where(clusterid==clusternames[j])[0]
+            X_cluster[i,j] = X[tmp_idx_i,:][:,tmp_idx_j].mean()
+    for i in range(n_permutations):
+        clusterid_perm = np.random.permutation(clusterid)
+        X_cluster_perm = np.empty([n,n], float)
+        for j in range(n):
+            tmp_idx_j = np.where(clusterid_perm==clusternames[j])[0]
+            for k in range(n):
+                tmp_idx_k = np.where(clusterid_perm==clusternames[k])[0]
+                X_cluster_perm[j,k] = X[tmp_idx_j,:][:,tmp_idx_k].mean()
+        p_cluster[X_cluster_perm >= X_cluster] += 1.0
+    p_cluster = p_cluster / n_permutations
+    df_cluster = pd.DataFrame(data=X_cluster, index=clusternames, columns=clusternames)
+    df_p_value = pd.DataFrame(data=p_cluster, index=clusternames, columns=clusternames)
+    return df_cluster, df_p_value
+
+def cluster_center(adata, clustering, method="geometric_mean"):
+    X = adata.obsm['spatial']
+    cluster_pos = {}
+    clusternames = list( adata.obs[clustering].unique() )
+    clusternames.sort()
+    clusterid = np.array( adata.obs[clustering], str )
+    for name in clusternames:
+        tmp_idx = np.where(clusterid==name)[0]
+        tmp_X = X[tmp_idx]
+        if method == "geometric_mean":
+            X_mean = np.mean(tmp_X, axis=0)
+        elif method == "representative_point":
+            tmp_D = distance_matrix(tmp_X, tmp_X)
+            tmp_D = tmp_D ** 2
+            X_mean = tmp_X[np.argmin(tmp_D.sum(axis=1)),:]
+        cluster_pos[name] = X_mean
+    return cluster_pos
 
 def spatial_communication(
-    adata: anndata.AnnData,
-    database_name: str = None,
+    adata: anndata.AnnData, 
+    database_name: str = None, 
     df_ligrec: pd.DataFrame = None,
     pathway_sum: bool = False,
     heteromeric: bool = False,
     heteromeric_rule: str = 'min',
-    heteromeric_delimiter: str = '_',
-    dis_thr: Optional[float] = None,
-    cost_scale: Optional[dict] = None,
+    heteromeric_delimiter: str = '_', 
+    dis_thr: Optional[float] = None, 
+    cost_scale: Optional[dict] = None, 
     cost_type: str = 'euc',
-    cot_eps_p: float = 1e-1,
-    cot_eps_mu: Optional[float] = None,
-    cot_eps_nu: Optional[float] = None,
-    cot_rho: float =1e1,
-    cot_nitermax: int = 10000,
-    cot_weights: tuple = (0.25,0.25,0.25,0.25),
-    smooth: bool = False,
-    smth_eta: float = None,
-    smth_nu: float = None,
+    cot_eps_p: float = 1e-1, 
+    cot_eps_mu: Optional[float] = None, 
+    cot_eps_nu: Optional[float] = None, 
+    cot_rho: float =1e1, 
+    cot_nitermax: int = 10000, 
+    cot_weights: tuple = (0.25,0.25,0.25,0.25), 
+    smooth: bool = False, 
+    smth_eta: float = None, 
+    smth_nu: float = None, 
     smth_kernel: str = 'exp',
-    n_jobs: int = -1,  # ⚡ 新增：并行化（默认使用所有核心）
-    copy: bool = False
+    copy: bool = False  
 ):
     """
-    ⚡ OPTIMIZED: 2.87x faster than original
+    Infer spatial communication.
+
+    Parameters
+    ----------
+    adata
+        The data matrix of shape ``n_obs`` × ``n_var``.
+        Rows correspond to cells or spots and columns to genes.
+        If the spatial distance is absent in ``.obsp['spatial_distance']``, Euclidean distance determined from ``.obsm['spatial']`` will be used.
+    database_name
+        Name of the ligand-receptor interaction database. Will be included in the keywords for anndata slots.
+    df_ligrec
+        A data frame where each row corresponds to a ligand-receptor pair with ligands, receptors, and the associated signaling pathways in the three columns, respectively.
+    pathway_sum
+        Whether to sum over all ligand-receptor pairs of each pathway.
+    heteromeric
+        Whether the ligands or receptors are made of heteromeric complexes.
+    heteromeric_rule
+        Use either 'min' (minimum) or 'ave' (average) expression of the components as the level for the heteromeric complex.
+    heteromeric_delimiter
+        The character in ligand and receptor names separating individual components.
+    dis_thr
+        The threshold of spatial distance of signaling.
+    cost_scale
+        Weight coefficients of the cost matrix for each ligand-receptor pair, e.g. cost_scale[('ligA','recA')] specifies weight for the pair ligA and recA.
+        If None, all pairs have the same weight. 
+    cost_type
+        If 'euc', the original Euclidean distance will be used as cost matrix. If 'euc_square', the square of the Euclidean distance will be used.
+    cot_eps_p
+        The coefficient of entropy regularization for transport plan.
+    cot_eps_mu
+        The coefficient of entropy regularization for untransported source (ligand). Set to equal to cot_eps_p for fast algorithm.
+    cot_eps_nu
+        The coefficient of entropy regularization for unfulfilled target (receptor). Set to equal to cot_eps_p for fast algorithm.
+    cot_rho
+        The coefficient of penalty for unmatched mass.
+    cot_nitermax
+        Maximum iteration for collective optimal transport algorithm.
+    cot_weights
+        A tuple of four weights that add up to one. The weights corresponds to four setups of collective optimal transport: 
+        1) all ligands-all receptors, 2) each ligand-all receptors, 3) all ligands-each receptor, 4) each ligand-each receptor.
+    smooth
+        Whether to (spatially) smooth the gene expression for identifying more global signaling trend.
+    smth_eta
+        Kernel bandwidth for smoothing
+    smth_nu
+        Kernel sharpness for smoothing
+    smth_kernel
+        'exp' exponential kernel. 'lorentz' Lorentz kernel.
+    copy
+        Whether to return a copy of the :class:`anndata.AnnData`.
+
+    Returns
+    -------
+    adata : anndata.AnnData
+        Signaling matrices are added to ``.obsp``, e.g., for a LR interaction database named "databaseX", 
+        ``.obsp['commot-databaseX-ligA-recA']``
+        is a ``n_obs`` × ``n_obs`` matrix with the *ij* th entry being the "score" of 
+        cell *i* sending signal to cell *j* through ligA and recA. If ``pathway_sum==True``, the cell-by-cell signaling matrix for a pathway "pathwayX" 
+        will be stored in ``.obsp['commot-databaseX-pathwayX']``.
+        The marginal sums (sender and receiver) of the signaling matrices are stored in ``.obsm['commot-databaseX-sum-sender']`` and ``.obsm['commot-databaseX-sum-receiver']``.
+        Metadata of the analysis is added to ``.uns['commot-databaseX-info']``.
+        If copy=True, return the AnnData object and return None otherwise.
+        
+    Examples
+    --------
+    >>> import anndata
+    >>> import commot as ct
+    >>> import pandas as pd
+    >>> import numpy as np
+    >>> # create a toy data with four cells and four genes
+    >>> X = np.array([[1,0,0,0],[2,0,0,0],[0,1,1,4],[0,3,4,1]], float)
+    >>> adata = anndata.AnnData(X=X, var=pd.DataFrame(index=['LigA','RecA','RecB','RecC']))
+    >>> adata.obsm['spatial'] = np.array([[0,0],[1,0],[0,1],[1,2]], float)
+    >>> # create a toy ligand-receptor database with two pairs sharing the same ligand
+    >>> df_ligrec = pd.DataFrame([['LigA','RecA_RecB'],['LigA','RecC']])
+    >>> df_ligrec = pd.DataFrame([['LigA','RecA_RecB','PathwayA'],['LigA','RecC','PathwayA']])
+    >>> # infer CCC with a distance threshold of 1.1. Due the threshold, the last cell won't be communicating with other cells.
+    >>> ct.tl.spatial_communication(adata, database_name='toyDB',df_ligrec=df_ligrec, pathway_sum=True, heteromeric=True, dis_thr=1.1)
+    >>> adata
+    AnnData object with n_obs × n_vars = 4 × 4
+        uns: 'commot-toyDB-info'
+        obsm: 'spatial', 'commot-toyDB-sum-sender', 'commot-toyDB-sum-receiver'
+        obsp: 'commot-toyDB-LigA-RecA_RecB', 'commot-toyDB-LigA-RecC', 'commot-toyDB-PathwayA', 'commot-toyDB-total-total'
+    >>> print(adata.obsp['commot-toyDB-LigA-RecA_RecB'])
+    (0, 2)	0.600000000000005
+    >>> print(adata.obsp['commot-toyDB-LigA-RecC'])
+    (0, 2)	0.9000000000039632
+    >>> print(adata.obsm['commot-toyDB-sum-receiver'])
+    r-LigA-RecA_RecB  r-LigA-RecC  r-total-total  r-PathwayA
+    0               0.0          0.0            0.0         0.0
+    1               0.0          0.0            0.0         0.0
+    2               0.6          0.9            1.5         1.5
+    3               0.0          0.0            0.0         0.0
+    >>> print(adata.obsm['commot-toyDB-sum-sender'])
+    s-LigA-RecA_RecB  s-LigA-RecC  s-total-total  s-PathwayA
+    0               0.6          0.9            1.5         1.5
+    1               0.0          0.0            0.0         0.0
+    2               0.0          0.0            0.0         0.0
+    3               0.0          0.0            0.0         0.0
+    >>> print(adata.obsp['commot-toyDB-PathwayA'])
+    (0, 2)	1.5000000000039682
+    >>> print(adata.obsp['commot-toyDB-total-total'])
+    (0, 2)	1.5000000000039682
+    >>> adata.uns['commot-toyDB-info']
+    {'df_ligrec':   ligand   receptor   pathway
+    0   LigA  RecA_RecB  PathwayA
+    1   LigA       RecC  PathwayA, 'distance_threshold': 1.1}
     
-    Infer spatial communication with automatic optimizations:
-    - Pre-extracts gene expression (avoids repeated anndata access)
-    - Parallel processing across L-R pairs (uses all CPU cores)
-    - Optimized Sinkhorn algorithm (reduced redundancy)
     
-    All optimizations are transparent - same API, same results, just faster!
-    
-    New parameter:
-        n_jobs : int, default=-1
-            Number of parallel jobs. -1 uses all CPU cores.
-            Set to 1 to disable parallelization.
-    
-    For full documentation, see original spatial_communication docstring.
     """
-    
+
     assert database_name is not None, "Please give a database_name"
     assert df_ligrec is not None, "Please give a ligand-receptor database"
-    
-    # ⚡ 计算距离矩阵（优化版）
+
     if not 'spatial_distance' in adata.obsp.keys():
-        # 使用优化的稀疏距离矩阵（如果dis_thr较小）
-        if dis_thr is not None and dis_thr < 1000:
-            dis_mat = compute_sparse_distance_matrix(adata.obsm["spatial"], dis_thr, cost_type)
-        else:
-            dis_mat = distance_matrix(adata.obsm["spatial"], adata.obsm["spatial"])
+        dis_mat = distance_matrix(adata.obsm["spatial"], adata.obsm["spatial"])
+        # assign_distance(adata, dmat=None)
     else:
         dis_mat = adata.obsp['spatial_distance']
-    
-    # 过滤L-R database
+
+    # remove unavailable genes from df_ligrec
     if not heteromeric:
         data_genes = list(adata.var_names)
         tmp_ligrec = []
@@ -384,7 +401,6 @@ def spatial_communication(
                 tmp_ligrec.append([df_ligrec.iloc[i][0], df_ligrec.iloc[i][1], df_ligrec.iloc[i][2]])
         tmp_ligrec = np.array(tmp_ligrec, str)
         df_ligrec = pd.DataFrame(data=tmp_ligrec)
-        df_ligrec.columns = range(df_ligrec.shape[1])
     elif heteromeric:
         data_genes = set(list(adata.var_names))
         tmp_ligrec = []
@@ -395,37 +411,33 @@ def spatial_communication(
                 tmp_ligrec.append([df_ligrec.iloc[i][0], df_ligrec.iloc[i][1], df_ligrec.iloc[i][2]])
         tmp_ligrec = np.array(tmp_ligrec, str)
         df_ligrec = pd.DataFrame(data=tmp_ligrec)
-        df_ligrec.columns = range(df_ligrec.shape[1])
-    
+    # Drop duplicate pairs
     df_ligrec = df_ligrec.drop_duplicates()
-    
-    # ⚡ 使用优化的CellCommunication类（预提取基因表达）
-    model = CellCommunicationHeavyOpt(adata,
-        df_ligrec,
-        dis_mat,
-        dis_thr,
-        cost_scale,
+
+
+    model = CellCommunication(adata, 
+        df_ligrec, 
+        dis_mat, 
+        dis_thr, 
+        cost_scale, 
         cost_type,
         heteromeric = heteromeric,
         heteromeric_rule = heteromeric_rule,
         heteromeric_delimiter = heteromeric_delimiter
     )
-    
-    model.run_cot_signaling(cot_eps_p=cot_eps_p,
-        cot_eps_mu = cot_eps_mu,
-        cot_eps_nu = cot_eps_nu,
-        cot_rho = cot_rho,
-        cot_nitermax = cot_nitermax,
-        cot_weights = cot_weights,
-        smooth = smooth,
-        smth_eta = smth_eta,
-        smth_nu = smth_nu,
-        smth_kernel = smth_kernel,
-        n_jobs = n_jobs,
-        verbose = False  # 保持安静，除非用户需要
+    model.run_cot_signaling(cot_eps_p=cot_eps_p, 
+        cot_eps_mu = cot_eps_mu, 
+        cot_eps_nu = cot_eps_nu, 
+        cot_rho = cot_rho, 
+        cot_nitermax = cot_nitermax, 
+        cot_weights = cot_weights, 
+        smooth = smooth, 
+        smth_eta = smth_eta, 
+        smth_nu = smth_nu, 
+        smth_kernel = smth_kernel
     )
+
     
-    # 保存结果（与原版相同）
     adata.uns['commot-'+database_name+'-info'] = {}
     df_ligrec_write = pd.DataFrame(data=df_ligrec.values, columns=['ligand','receptor','pathway'])
     adata.uns['commot-'+database_name+'-info']['df_ligrec'] = df_ligrec_write
@@ -439,13 +451,11 @@ def spatial_communication(
     tmp_ligs = model.ligs
     tmp_recs = model.recs
     S_total = sparse.csr_matrix((ncell, ncell), dtype=float)
-    
     if pathway_sum:
         pathways = list(np.sort(list(set(df_ligrec.iloc[:,2].values))))
         S_pathway = [sparse.csr_matrix((ncell, ncell), dtype=float) for i in range(len(pathways))]
         X_sender_pathway = [np.zeros([ncell,1], float) for i in range(len(pathways))]
         X_receiver_pathway = [np.zeros([ncell,1], float) for i in range(len(pathways))]
-    
     for (i,j) in model.comm_network.keys():
         S = model.comm_network[(i,j)]
         adata.obsp['commot-'+database_name+'-'+tmp_ligs[i]+'-'+tmp_recs[j]] = S
@@ -463,7 +473,6 @@ def spatial_communication(
             S_pathway[pathway_idx] = S_pathway[pathway_idx] + S
             X_sender_pathway[pathway_idx] = X_sender_pathway[pathway_idx] + np.array(S.sum(axis=1))
             X_receiver_pathway[pathway_idx] = X_receiver_pathway[pathway_idx] + np.array(S.sum(axis=0).T)
-    
     if pathway_sum:
         for pathway_idx in range(len(pathways)):
             pathway = pathways[pathway_idx]
@@ -493,6 +502,8 @@ def spatial_communication(
     gc.collect()
 
     return adata if copy else None
+
+
 def communication_direction(
     adata: anndata.AnnData,
     database_name: str = None,
