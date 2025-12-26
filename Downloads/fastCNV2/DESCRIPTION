@@ -1,0 +1,46 @@
+Package: fastCNV2
+Title: fastCNV2 - Fast CNV Detection with Enhanced Compatibility (Modified Version)
+Version: 1.5.0
+Authors@R: 
+    c(person("Gadea", "Cabrejas", , "gadea.cabrejas-saiz@u-paris.fr", role = c("aut", "cph"), comment = "Original author"),
+      person("Clarice", "Groeneveld", , "clarice.groeneveld@inserm.fr", role = c("aut"), comment = "Original author"),
+      person("Zaoqu", "Liu", , "liuzaoqu@163.com", role = c("cre", "ctb"), comment = "Modified for enhanced compatibility"))
+Description: Computes CNV quickly on Seurat objects. This is a modified version of the original
+    fastCNV package with enhanced compatibility for Seurat 4.x/5.x, improved error handling,
+    and better user experience. Original package by Gadea Cabrejas and Clarice Groeneveld.
+License: GPL-3
+URL: https://github.com/Zaoqu-Liu/fastCNV2
+BugReports: https://github.com/Zaoqu-Liu/fastCNV2/issues
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+biocViews: 
+Imports: 
+    biomaRt,
+    circlize,
+    crayon,
+    ComplexHeatmap,
+    dplyr,
+    FNN,
+    ggplot2,
+    ggtree,
+    grDevices,
+    grid,
+    paletteer,
+    purrr,
+    scales,
+    Seurat (== 4.4.0),
+    SeuratObject (== 4.1.4),
+    stats,
+    stringr,
+    ape,
+    phangorn,
+    utils,
+    proxy,
+    graphics
+LazyData: true
+Depends: R (>= 3.5.0)
+Suggests: fastCNVdata, knitr, rmarkdown, patchwork
+NeedsCompilation: no
+Packaged: 2024-04-08 13:48:38 UTC; gadea
+Maintainer: Gadea Cabrejas <gadea.cabrejas-saiz@u-paris.fr>
