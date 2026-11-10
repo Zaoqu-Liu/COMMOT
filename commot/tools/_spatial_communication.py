@@ -36,6 +36,49 @@ def coo_from_dense_submat(row, col, x, shape):
     sparse_mat.eliminate_zeros()
     return(sparse_mat)
 
+def summarize_cluster(X, clusterid, clusternames, n_permutations=500):
+    # Input a sparse matrix of cell signaling and output a pandas dataframe
+    # for cluster-cluster signaling
+    n = len(clusternames)
+    X_cluster = np.empty([n,n], float)
+    p_cluster = np.zeros([n,n], float)
+    for i in range(n):
+        tmp_idx_i = np.where(clusterid==clusternames[i])[0]
+        for j in range(n):
+            tmp_idx_j = np.where(clusterid==clusternames[j])[0]
+            X_cluster[i,j] = X[tmp_idx_i,:][:,tmp_idx_j].mean()
+    for i in range(n_permutations):
+        clusterid_perm = np.random.permutation(clusterid)
+        X_cluster_perm = np.empty([n,n], float)
+        for j in range(n):
+            tmp_idx_j = np.where(clusterid_perm==clusternames[j])[0]
+            for k in range(n):
+                tmp_idx_k = np.where(clusterid_perm==clusternames[k])[0]
+                X_cluster_perm[j,k] = X[tmp_idx_j,:][:,tmp_idx_k].mean()
+        p_cluster[X_cluster_perm >= X_cluster] += 1.0
+    p_cluster = p_cluster / n_permutations
+    df_cluster = pd.DataFrame(data=X_cluster, index=clusternames, columns=clusternames)
+    df_p_value = pd.DataFrame(data=p_cluster, index=clusternames, columns=clusternames)
+    return df_cluster, df_p_value
+
+def cluster_center(adata, clustering, method="geometric_mean"):
+    X = adata.obsm['spatial']
+    cluster_pos = {}
+    clusternames = list( adata.obs[clustering].unique() )
+    clusternames.sort()
+    clusterid = np.array( adata.obs[clustering], str )
+    for name in clusternames:
+        tmp_idx = np.where(clusterid==name)[0]
+        tmp_X = X[tmp_idx]
+        if method == "geometric_mean":
+            X_mean = np.mean(tmp_X, axis=0)
+        elif method == "representative_point":
+            tmp_D = distance_matrix(tmp_X, tmp_X)
+            tmp_D = tmp_D ** 2
+            X_mean = tmp_X[np.argmin(tmp_D.sum(axis=1)),:]
+        cluster_pos[name] = X_mean
+    return cluster_pos
+
 class CellCommunicationHeavyOpt(object):
     """
     ⚡⚡⚡ 完全优化版本的CellCommunication
